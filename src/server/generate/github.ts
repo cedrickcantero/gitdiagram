@@ -131,7 +131,7 @@ const EXCLUDED_SUFFIXES = [
 // Minified bundles carry no architectural signal regardless of extension.
 const MINIFIED_INFIX = ".min.";
 
-function shouldIncludeFile(path: string): boolean {
+export function shouldIncludeFile(path: string): boolean {
   const lowerPath = path.toLowerCase();
 
   if (lowerPath.includes(MINIFIED_INFIX)) {
