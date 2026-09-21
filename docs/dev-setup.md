@@ -5,7 +5,18 @@ GitDiagram is one Next.js application. The UI and generation API run together; n
 ## Prerequisites
 
 - Node.js `20.9.0` or newer, as required by Next.js 16
-- Bun `1.3.11` or a compatible `1.3.x`
+- Bun `1.4.0` or newer
+
+`1.3.14` is the oldest version that can build the project at all, but `1.4` is
+the supported floor. Anything older than `1.3.14` fails `bun run build` while
+collecting page data, with `Expected CommonJS module to have a function wrapper`
+thrown while loading Next's compiled Turbopack server runtime. That message
+blames Bun without naming a version, so it reads like a project fault rather
+than a stale toolchain. Verified failing on `1.3.4` and `1.3.11`, and passing on
+`1.3.14` and `1.4.2`.
+
+Bun `1.4` writes `bun.lock` at `lockfileVersion` 3, which Bun `1.3.x` cannot
+read, so a mixed-version team will churn the lockfile.
 
 ```bash
 node --version
