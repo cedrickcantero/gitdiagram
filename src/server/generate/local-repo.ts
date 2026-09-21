@@ -12,6 +12,8 @@ import {
   type RepositoryPathType,
   type SourceBlob,
 } from "./github";
+import { MAX_SOURCE_FILE_BYTES } from "./repository-context";
+import type { SourceExcerpt, SourceReader } from "./source-context";
 
 /** Reserved owner segment. `/local/<name>` addresses a repository on disk. */
 export const LOCAL_REPO_OWNER = "local";
@@ -254,5 +256,36 @@ export async function loadLocalRepository(
       pathTypes,
       sourceBlobs,
     },
+  };
+}
+
+/**
+ * Reads file bodies out of the local object store.
+ *
+ * No hash verification here, unlike the GitHub readers: `cat-file blob <sha>`
+ * is content-addressed, so a returned body cannot disagree with the SHA that
+ * requested it. The GitHub readers verify because their transport can serve a
+ * different revision than the tree named.
+ */
+export function createLocalSourceReader(repoPath: string): SourceReader {
+  return async ({ path, blob, signal }): Promise<SourceExcerpt | null> => {
+    if (blob.size > MAX_SOURCE_FILE_BYTES) return null;
+
+    const bytes = await runGit(
+      repoPath,
+      ["cat-file", "blob", blob.sha],
+      signal,
+    );
+    if (bytes.length > MAX_SOURCE_FILE_BYTES || bytes.includes(0)) return null;
+
+    try {
+      return {
+        path,
+        text: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+        truncated: false,
+      };
+    } catch {
+      return null;
+    }
   };
 }

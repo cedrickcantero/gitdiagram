@@ -19,6 +19,7 @@ import {
   LOCAL_REPO_NOT_FOUND_ERROR,
   LOCAL_REPO_NOT_GIT_ERROR,
   LOCAL_REPO_OWNER,
+  createLocalSourceReader,
   isLocalRepoEnabled,
   loadLocalRepository,
   resolveLocalRepoPath,
@@ -304,4 +305,56 @@ describe("loadLocalRepository", () => {
     },
     120_000,
   );
+});
+
+describe("createLocalSourceReader", () => {
+  it("reads a file body by blob sha", async () => {
+    const path = await initRepo("bodies", { "a.ts": "export const a = 1;\n" });
+    await commitAll(path);
+    const { repoPath, data } = await loadLocalRepository("bodies");
+    const blob = data.sourceBlobs!.get("a.ts")!;
+
+    const excerpt = await createLocalSourceReader(repoPath)({
+      path: "a.ts",
+      blob,
+      signal: AbortSignal.timeout(5_000),
+    });
+
+    expect(excerpt).toEqual({
+      path: "a.ts",
+      text: "export const a = 1;\n",
+      truncated: false,
+    });
+  });
+
+  it("returns null for a blob larger than the byte cap", async () => {
+    const path = await initRepo("big", { "a.ts": "x" });
+    await commitAll(path);
+    const { repoPath, data } = await loadLocalRepository("big");
+    const blob = { ...data.sourceBlobs!.get("a.ts")!, size: 10_000_000 };
+
+    await expect(
+      createLocalSourceReader(repoPath)({
+        path: "a.ts",
+        blob,
+        signal: AbortSignal.timeout(5_000),
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("returns null for binary content", async () => {
+    const path = await initRepo("binary", {});
+    await writeFile(join(path, "blob.bin"), Buffer.from([0x01, 0x00, 0x02]));
+    await commitAll(path);
+    const { repoPath, data } = await loadLocalRepository("binary");
+    const blob = data.sourceBlobs!.get("blob.bin")!;
+
+    await expect(
+      createLocalSourceReader(repoPath)({
+        path: "blob.bin",
+        blob,
+        signal: AbortSignal.timeout(5_000),
+      }),
+    ).resolves.toBeNull();
+  });
 });
