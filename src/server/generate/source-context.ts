@@ -9,7 +9,7 @@ import {
   isArchitectureSource,
 } from "./repository-context";
 
-interface SourceExcerpt {
+export interface SourceExcerpt {
   path: string;
   text: string;
   truncated: boolean;
@@ -19,6 +19,17 @@ export interface SourceContext {
   paths: string[];
   unavailableCount: number;
 }
+
+/**
+ * Reads one file's body. The GitHub default resolves its own recovery path
+ * internally, which is why this type never surfaces a "changed" state: callers
+ * only ever see a usable excerpt or nothing.
+ */
+export type SourceReader = (params: {
+  path: string;
+  blob: SourceBlob;
+  signal: AbortSignal;
+}) => Promise<SourceExcerpt | null>;
 
 async function readBoundedBytes(
   response: Response,
@@ -126,6 +137,59 @@ async function readPublicSource(params: {
   };
 }
 
+function createGithubSourceReader(params: {
+  username: string;
+  repo: string;
+  githubData: GithubData;
+  githubPat?: string;
+  headers: HeadersInit;
+}): SourceReader {
+  let changedSourceRecoveries = 0;
+
+  return async ({ path, blob, signal }) => {
+    if (params.githubData.isPrivate) {
+      return readBlob({
+        username: params.username,
+        repo: params.repo,
+        path,
+        blob,
+        headers: params.headers,
+        signal,
+      });
+    }
+
+    const source = await readPublicSource({
+      username: params.username,
+      repo: params.repo,
+      branch: params.githubData.defaultBranch,
+      path,
+      blob,
+      signal,
+    });
+
+    if (source !== "changed") return source;
+
+    // A fresh commit or stale CDN entry can hide the most important file.
+    // Recover its immutable blob with at most two REST reads, inside the same
+    // ingestion deadline. Ordinary CDN failures do not fan out into a dozen
+    // quota-consuming API requests.
+    if (changedSourceRecoveries++ >= 2) return null;
+
+    return readBlob({
+      username: params.username,
+      repo: params.repo,
+      path,
+      blob,
+      signal,
+      headers: await getGitHubApiHeaders({
+        githubPat: params.githubData.usedPublicFallback
+          ? undefined
+          : params.githubPat,
+      }),
+    });
+  };
+}
+
 export async function fetchSourceContext(params: {
   username: string;
   repo: string;
@@ -133,6 +197,7 @@ export async function fetchSourceContext(params: {
   selectedPaths: string[];
   githubPat?: string;
   signal?: AbortSignal;
+  reader?: SourceReader;
 }): Promise<SourceContext> {
   params.signal?.throwIfAborted();
   if (params.githubData.isPrivate && !params.githubPat?.trim())
@@ -158,8 +223,16 @@ export async function fetchSourceContext(params: {
   const headers = params.githubData.isPrivate
     ? await getGitHubApiHeaders({ githubPat: params.githubPat })
     : {};
+  const reader =
+    params.reader ??
+    createGithubSourceReader({
+      username: params.username,
+      repo: params.repo,
+      githubData: params.githubData,
+      githubPat: params.githubPat,
+      headers,
+    });
   let next = 0;
-  let changedSourceRecoveries = 0;
   await Promise.all(
     Array.from({ length: 3 }, async () => {
       while (next < paths.length && !signal.aborted) {
@@ -173,42 +246,7 @@ export async function fetchSourceContext(params: {
         )
           continue;
         try {
-          if (params.githubData.isPrivate) {
-            result[index] = await readBlob({
-              ...params,
-              path,
-              blob,
-              headers,
-              signal,
-            });
-          } else {
-            const source = await readPublicSource({
-              ...params,
-              branch: params.githubData.defaultBranch,
-              path,
-              blob,
-              signal,
-            });
-            if (source === "changed") {
-              // A fresh commit or stale CDN entry can hide the most important
-              // file. Recover its immutable blob with at most two REST reads,
-              // inside the same ingestion deadline. Ordinary CDN failures do
-              // not fan out into a dozen quota-consuming API requests.
-              if (changedSourceRecoveries++ < 2) {
-                result[index] = await readBlob({
-                  ...params,
-                  path,
-                  blob,
-                  signal,
-                  headers: await getGitHubApiHeaders({
-                    githubPat: params.githubData.usedPublicFallback
-                      ? undefined
-                      : params.githubPat,
-                  }),
-                });
-              }
-            } else result[index] = source;
-          }
+          result[index] = await reader({ path, blob, signal });
         } catch {
           params.signal?.throwIfAborted();
         }

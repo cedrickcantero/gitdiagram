@@ -242,3 +242,46 @@ describe("bounded source ingestion", () => {
     ).toBe(2);
   });
 });
+
+describe("fetchSourceContext reader seam", () => {
+  it("uses a supplied reader instead of the network", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await fetchSourceContext({
+      username: "owner",
+      repo: "repo",
+      githubData: repo(),
+      selectedPaths: ["src/main.ts"],
+      reader: async ({ path }) => ({
+        path,
+        text: "from the local reader",
+        truncated: false,
+      }),
+    });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(result.paths).toEqual(["src/main.ts"]);
+    expect(result.text).toContain("from the local reader");
+  });
+
+  // Guards the refactor itself: every existing caller passes no reader, so the
+  // GitHub behavior must remain exactly what it was.
+  it("still uses the GitHub readers when no reader is supplied", async () => {
+    const fetchSpy = vi.fn(async (_input: string) => new Response(source));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await fetchSourceContext({
+      username: "owner",
+      repo: "repo",
+      githubData: repo(),
+      selectedPaths: ["src/main.ts"],
+    });
+
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(String(fetchSpy.mock.calls[0]![0])).toContain(
+      "raw.githubusercontent.com",
+    );
+    expect(result.text).toContain(source);
+  });
+});
