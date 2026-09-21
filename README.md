@@ -18,6 +18,7 @@ Turn any public or private GitHub repository into an interactive architecture di
 - **Explore the architecture** with an AI-generated diagram and streamed explanation.
 - **Jump to the code** by clicking any component's linked file or directory.
 - **Use private repositories** with a GitHub token via **Private Repos** in the header.
+- **Diagram a local repository** from disk at `/local/<folder-name>` when running a development server.
 - **Export diagrams** as PNG or copy the Mermaid source.
 
 ## Run locally
@@ -38,6 +39,12 @@ bun run dev
 ```
 
 Open [localhost:3000](http://localhost:3000).
+
+### Local repositories
+
+A development server can diagram a git repository on disk instead of one on GitHub. Set both `LOCAL_REPO_ROOT`, a directory containing git repositories, and `R2_ENDPOINT` in `.env`, then open `/local/<folder-name>`.
+
+The repository is read at committed `HEAD`, so uncommitted work is not included. The mode is unavailable in production builds. `R2_ENDPOINT` is required because a local generation writes its diagram to whichever artifact bucket storage points at, so the mode refuses to run unless storage is aimed at a local S3. See the [setup guide](docs/dev-setup.md#configure) for details.
 
 ## Development
 
