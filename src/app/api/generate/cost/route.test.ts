@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   getGithubData: vi.fn(),
   resolveRequestCredentials: vi.fn(),
   consumeInfrastructureRateLimit: vi.fn(),
+  isLocalRepoEnabled: vi.fn(),
+  loadLocalRepository: vi.fn(),
 }));
 
 vi.mock("~/server/generate/rate-limit", () => ({
@@ -30,6 +32,11 @@ vi.mock("~/server/generate/github", () => ({
   REPOSITORY_TOO_LARGE_ERROR:
     "Repository is too large (>195k tokens) for analysis. Try a smaller repo.",
 }));
+vi.mock("~/server/generate/local-repo", () => ({
+  LOCAL_REPO_OWNER: "local",
+  isLocalRepoEnabled: mocks.isLocalRepoEnabled,
+  loadLocalRepository: mocks.loadLocalRepository,
+}));
 vi.mock("~/server/generate/model-config", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   getModel: vi.fn(() => "gpt-5.6-terra"),
@@ -42,7 +49,7 @@ vi.mock("~/server/http/request-credentials", () => ({
 
 import { POST } from "~/app/api/generate/cost/route";
 
-function request() {
+function request(body: Record<string, unknown> = {}) {
   return new Request("https://gitdiagram.com/api/generate/cost", {
     method: "POST",
     headers: {
@@ -50,7 +57,7 @@ function request() {
       Origin: "https://gitdiagram.com",
       "Sec-Fetch-Site": "same-origin",
     },
-    body: JSON.stringify({ username: "openai", repo: "openai-node" }),
+    body: JSON.stringify({ username: "openai", repo: "openai-node", ...body }),
   });
 }
 
@@ -82,6 +89,9 @@ describe("POST /api/generate/cost", () => {
       isPrivate: false,
       stargazerCount: 10,
     });
+    // Off by default, matching every deployed environment: LOCAL_REPO_ROOT is
+    // unset, so isLocalRepoEnabled() is false and the GitHub path is taken.
+    mocks.isLocalRepoEnabled.mockReturnValue(false);
   });
 
   it("uses cookie credentials when the compatibility body fields are absent", async () => {
@@ -236,6 +246,42 @@ describe("POST /api/generate/cost", () => {
       ok: false,
       error: "Cost estimation timed out. Please retry.",
       error_code: "GENERATION_TIMEOUT",
+    });
+  });
+
+  describe("local repository mode", () => {
+    beforeEach(() => {
+      mocks.estimateCost.mockResolvedValue({
+        costSummary: { display: "$0.0100 USD" },
+        pricingModel: "gpt-5.6-terra",
+        estimatedInputTokens: 100,
+        estimatedOutputTokens: 200,
+        pricing: { inputPerMillionUsd: 1, outputPerMillionUsd: 2 },
+      });
+    });
+
+    it("takes the GitHub path when local mode is enabled but the owner is not local", async () => {
+      mocks.isLocalRepoEnabled.mockReturnValue(true);
+
+      const response = await POST(
+        request({ username: "openai", repo: "openai-node" }),
+      );
+      await response.json();
+
+      expect(mocks.getGithubData).toHaveBeenCalledTimes(1);
+      expect(mocks.loadLocalRepository).not.toHaveBeenCalled();
+    });
+
+    it("takes the GitHub path when the owner is local but local mode is disabled", async () => {
+      mocks.isLocalRepoEnabled.mockReturnValue(false);
+
+      const response = await POST(
+        request({ username: "local", repo: "countercheck" }),
+      );
+      await response.json();
+
+      expect(mocks.getGithubData).toHaveBeenCalledTimes(1);
+      expect(mocks.loadLocalRepository).not.toHaveBeenCalled();
     });
   });
 });

@@ -12,6 +12,9 @@ const mocks = vi.hoisted(() => ({
   getGithubData: vi.fn(),
   getModel: vi.fn(),
   isComplimentaryGateEnabled: vi.fn(),
+  isLocalRepoEnabled: vi.fn(),
+  loadLocalRepository: vi.fn(),
+  createLocalSourceReader: vi.fn(),
   shouldApplyComplimentaryGate: vi.fn(),
   persistAudit: vi.fn(),
   consumeInfrastructureRateLimit: vi.fn(),
@@ -73,6 +76,12 @@ vi.mock("~/server/generate/github", () => ({
   getGithubData: mocks.getGithubData,
   REPOSITORY_TOO_LARGE_ERROR:
     "Repository is too large (>195k tokens) for analysis. Try a smaller repo.",
+}));
+vi.mock("~/server/generate/local-repo", () => ({
+  LOCAL_REPO_OWNER: "local",
+  isLocalRepoEnabled: mocks.isLocalRepoEnabled,
+  loadLocalRepository: mocks.loadLocalRepository,
+  createLocalSourceReader: mocks.createLocalSourceReader,
 }));
 vi.mock("~/server/generate/model-config", async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -145,6 +154,10 @@ describe("POST /api/generate/stream", () => {
     mocks.getModel.mockReturnValue("gpt-5.6-terra");
     mocks.isComplimentaryGateEnabled.mockReturnValue(true);
     mocks.shouldApplyComplimentaryGate.mockReturnValue(true);
+    // Off by default, matching every deployed environment: LOCAL_REPO_ROOT is
+    // unset, so isLocalRepoEnabled() is false and the GitHub path is taken.
+    mocks.isLocalRepoEnabled.mockReturnValue(false);
+    mocks.createLocalSourceReader.mockReturnValue(vi.fn());
     vi.spyOn(console, "info").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     mocks.getGithubData.mockResolvedValue({
@@ -1081,5 +1094,67 @@ describe("POST /api/generate/stream", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe("local repository mode", () => {
+    it("resolves a local repository exactly once and reuses its path for the source reader", async () => {
+      mockEstimate(1_000);
+      mocks.isLocalRepoEnabled.mockReturnValue(true);
+      mocks.loadLocalRepository.mockResolvedValue({
+        repoPath: "/repos/countercheck",
+        data: {
+          defaultBranch: "main",
+          fileTree: "src/index.ts",
+          pathTypes: new Map([["src/index.ts", "blob"]]),
+          readme: "# Countercheck",
+          isPrivate: false,
+          stargazerCount: null,
+        },
+      });
+
+      const response = await POST(
+        request({ username: "local", repo: "countercheck" }),
+      );
+      await response.text();
+
+      // The single-resolution property: loadLocalRepository must resolve the
+      // path exactly once per request, not once for the data and again for
+      // the reader.
+      expect(mocks.loadLocalRepository).toHaveBeenCalledTimes(1);
+      expect(mocks.loadLocalRepository).toHaveBeenCalledWith(
+        "countercheck",
+        expect.any(AbortSignal),
+      );
+      expect(mocks.getGithubData).not.toHaveBeenCalled();
+      expect(mocks.createLocalSourceReader).toHaveBeenCalledWith(
+        "/repos/countercheck",
+      );
+    });
+
+    it("takes the GitHub path when local mode is enabled but the owner is not local", async () => {
+      mockEstimate(1_000);
+      mocks.isLocalRepoEnabled.mockReturnValue(true);
+
+      const response = await POST(
+        request({ username: "openai", repo: "openai-node" }),
+      );
+      await response.text();
+
+      expect(mocks.getGithubData).toHaveBeenCalledTimes(1);
+      expect(mocks.loadLocalRepository).not.toHaveBeenCalled();
+    });
+
+    it("takes the GitHub path when the owner is local but local mode is disabled", async () => {
+      mockEstimate(1_000);
+      mocks.isLocalRepoEnabled.mockReturnValue(false);
+
+      const response = await POST(
+        request({ username: "local", repo: "countercheck" }),
+      );
+      await response.text();
+
+      expect(mocks.getGithubData).toHaveBeenCalledTimes(1);
+      expect(mocks.loadLocalRepository).not.toHaveBeenCalled();
+    });
   });
 });

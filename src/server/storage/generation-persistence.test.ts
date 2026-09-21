@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   revalidatePath: vi.fn(),
   revalidateTag: vi.fn(),
   revalidateBrowseIndexCache: vi.fn(),
+  isLocalRepoEnabled: vi.fn(),
 }));
 
 vi.mock("next/cache", () => ({
@@ -29,6 +30,10 @@ vi.mock("~/server/storage/diagram-state", () => ({
 }));
 vi.mock("~/server/storage/artifact-store", () => ({
   writePublicDiagramPreview: mocks.writePublicDiagramPreview,
+}));
+vi.mock("~/server/generate/local-repo", () => ({
+  LOCAL_REPO_OWNER: "local",
+  isLocalRepoEnabled: mocks.isLocalRepoEnabled,
 }));
 
 import { persistGenerationResult } from "~/server/storage/generation-persistence";
@@ -70,6 +75,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.saveSuccessfulDiagramState.mockResolvedValue(true);
   vi.spyOn(console, "info").mockImplementation(() => undefined);
+  // Off by default, matching every deployed environment: LOCAL_REPO_ROOT is
+  // unset, so isLocalRepoEnabled() is false and the browse index always
+  // records a successful diagram.
+  mocks.isLocalRepoEnabled.mockReturnValue(false);
 });
 
 describe("persistGenerationResult", () => {
@@ -141,6 +150,52 @@ describe("persistGenerationResult", () => {
     expect(mocks.revalidatePath).toHaveBeenCalledWith("/acme/demo");
     expect(mocks.revalidatePath).toHaveBeenCalledWith(
       "/acme/demo/opengraph-image",
+    );
+  });
+
+  it("skips the browse index for a successful local repository but still revalidates its page", async () => {
+    mocks.isLocalRepoEnabled.mockReturnValue(true);
+    const params = {
+      ...baseParams(),
+      username: "local",
+      repo: "countercheck",
+      visibility: "public" as const,
+    };
+
+    await persistGenerationResult(params);
+    for (const task of params.postResponseTasks) {
+      await task();
+    }
+
+    // The skip must be narrow: a local repository's own page still needs to
+    // refresh, only its entry in the shared browse index is withheld.
+    expect(
+      mocks.updatePublicBrowseIndexForSuccessfulDiagram,
+    ).not.toHaveBeenCalled();
+    expect(mocks.revalidatePath).toHaveBeenCalledWith("/local/countercheck");
+    expect(mocks.revalidatePath).toHaveBeenCalledWith(
+      "/local/countercheck/opengraph-image",
+    );
+    expect(mocks.revalidateTag).toHaveBeenCalledWith(
+      "public-diagram-state:local:countercheck",
+      { expire: 0 },
+    );
+    expect(mocks.revalidateBrowseIndexCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("still updates the browse index for a successful non-local repository", async () => {
+    // Local mode being enabled globally must not widen the skip to every
+    // repository; only the reserved "local" owner segment is excluded.
+    mocks.isLocalRepoEnabled.mockReturnValue(true);
+    const params = { ...baseParams(), visibility: "public" as const };
+
+    await persistGenerationResult(params);
+    for (const task of params.postResponseTasks) {
+      await task();
+    }
+
+    expect(mocks.updatePublicBrowseIndexForSuccessfulDiagram).toHaveBeenCalledWith(
+      expect.objectContaining({ username: "Acme", repo: "Demo" }),
     );
   });
 });
