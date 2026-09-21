@@ -53,6 +53,12 @@ import {
   REPOSITORY_TOO_LARGE_ERROR,
 } from "~/server/generate/github";
 import {
+  LOCAL_REPO_OWNER,
+  createLocalSourceReader,
+  isLocalRepoEnabled,
+  loadLocalRepository,
+} from "~/server/generate/local-repo";
+import {
   buildFileTreeLookup,
   compileDiagramGraph,
   type GraphValidationCategory,
@@ -359,12 +365,19 @@ export async function POST(request: Request) {
           }
 
           const githubStartedAt = performance.now();
-          const githubData = await getGithubData(
-            username,
-            repo,
-            githubPat,
-            generationAbortController.signal,
-          );
+          const useLocalRepo =
+            isLocalRepoEnabled() && username === LOCAL_REPO_OWNER;
+          const localRepo = useLocalRepo
+            ? await loadLocalRepository(repo, generationAbortController.signal)
+            : null;
+          const githubData =
+            localRepo?.data ??
+            (await getGithubData(
+              username,
+              repo,
+              githubPat,
+              generationAbortController.signal,
+            ));
           repositoryVerified = true;
           recordTiming("github", githubStartedAt);
           storageVisibility = githubData.isPrivate ? "private" : "public";
@@ -387,6 +400,9 @@ export async function POST(request: Request) {
             selectedPaths: context.selectedPaths,
             githubPat,
             signal: generationAbortController.signal,
+            reader: localRepo
+              ? createLocalSourceReader(localRepo.repoPath)
+              : undefined,
           });
           recordTiming("source_context", sourceStartedAt);
           audit = {

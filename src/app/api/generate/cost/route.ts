@@ -19,6 +19,11 @@ import {
   REPOSITORY_TOO_LARGE_ERROR,
 } from "~/server/generate/github";
 import {
+  LOCAL_REPO_OWNER,
+  isLocalRepoEnabled,
+  loadLocalRepository,
+} from "~/server/generate/local-repo";
+import {
   getModel,
   getProvider,
   shouldUseExactInputTokenCount,
@@ -141,7 +146,10 @@ export async function POST(request: Request) {
       }
     }
 
-    const githubData = await getGithubData(username, repo, githubPat, signal);
+    const githubData =
+      isLocalRepoEnabled() && username === LOCAL_REPO_OWNER
+        ? (await loadLocalRepository(repo, signal)).data
+        : await getGithubData(username, repo, githubPat, signal);
     const context = prepareRepositoryContext(githubData);
     const analysisModel = selectAnalysisModel({
       provider,

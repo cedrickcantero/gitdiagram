@@ -59,6 +59,14 @@ Optional browser analytics:
 
 - `NEXT_PUBLIC_POSTHOG_KEY`
 
+Optional local repository analysis:
+
+- `LOCAL_REPO_ROOT` points at a directory of git repositories. With it set, a
+  development server serves `/local/<folder-name>` by reading that repository
+  from disk at committed `HEAD` instead of calling GitHub. It is ignored in
+  production builds, so a production-mode check via `bun run build` and
+  `bun run start` will not serve it.
+
 The default OpenAI configuration is:
 
 ```dotenv

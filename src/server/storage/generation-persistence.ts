@@ -1,6 +1,10 @@
 import { revalidatePath, revalidateTag } from "next/cache";
 
 import { revalidateBrowseIndexCache } from "~/server/browse-index-cache";
+import {
+  LOCAL_REPO_OWNER,
+  isLocalRepoEnabled,
+} from "~/server/generate/local-repo";
 import type {
   DiagramGraph,
   GenerationSessionAudit,
@@ -139,12 +143,18 @@ export async function persistGenerationResult(params: {
               // "max" serves the previous artifact once while refreshing it.
               { expire: 0 },
             );
-            await updatePublicBrowseIndexForSuccessfulDiagram({
-              username: params.username,
-              repo: params.repo,
-              lastSuccessfulAt,
-              stargazerCount: successfulDiagramState.stargazerCount,
-            });
+            // A local repository is one developer's working copy, not a public
+            // repository anyone else can open. Keep its name out of Browse.
+            if (
+              !(isLocalRepoEnabled() && params.username === LOCAL_REPO_OWNER)
+            ) {
+              await updatePublicBrowseIndexForSuccessfulDiagram({
+                username: params.username,
+                repo: params.repo,
+                lastSuccessfulAt,
+                stargazerCount: successfulDiagramState.stargazerCount,
+              });
+            }
             revalidateBrowseIndexCache();
           } catch (error) {
             console.error(
