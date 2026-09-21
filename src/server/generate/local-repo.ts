@@ -32,14 +32,27 @@ export const LOCAL_REPO_READ_FAILED_ERROR =
   "Could not read the local repository.";
 
 /**
- * Local mode needs an explicit opt-in AND a non-production build. Requiring
- * both means a stray environment variable on a deployed instance cannot expose
- * that server's filesystem under `/local/*`.
+ * Local mode needs an explicit opt-in, a non-production build, AND a
+ * non-empty `R2_ENDPOINT`. Requiring the first two means a stray environment
+ * variable on a deployed instance cannot expose that server's filesystem
+ * under `/local/*`.
+ *
+ * The third condition exists for a different reason: a local generation's
+ * diagram and README excerpt are written to whatever artifact bucket storage
+ * is configured with, which is the same PUBLIC bucket a real deployment
+ * uses. The design assumed that bucket is always local MinIO in development,
+ * but nothing else enforces that, so a developer running this server against
+ * real R2 credentials would publish a private, possibly unpushed repository's
+ * diagram to a real public bucket. `R2_ENDPOINT` only has a value when
+ * storage has been deliberately pointed at a local S3-compatible server (see
+ * `src/server/storage/r2.ts`), so requiring it here keeps that publish local
+ * too.
  */
 export function isLocalRepoEnabled(): boolean {
   return (
     process.env.NODE_ENV !== "production" &&
-    Boolean(process.env.LOCAL_REPO_ROOT?.trim())
+    Boolean(process.env.LOCAL_REPO_ROOT?.trim()) &&
+    Boolean(process.env.R2_ENDPOINT?.trim())
   );
 }
 
@@ -99,13 +112,38 @@ const MAX_GIT_OUTPUT_BYTES = 16 * 1024 * 1024;
 const README_PATTERN = /^readme(\.[^./]+)?$/i;
 
 /**
+ * Thrown by `runGit` on any failure. `gitExitedNonZero` tells the caller
+ * whether the git process actually started and produced an exit code (a real
+ * answer about the repository, such as "no commits yet") versus a failure
+ * where git never got that far: a spawn failure (git missing from PATH) or
+ * the command timing out. Only the former is safe to reinterpret as a
+ * specific repository state; the latter is a configuration problem on this
+ * machine, not a fact about the repository, and must not be reported as one.
+ */
+class LocalGitCommandError extends Error {
+  constructor(
+    message: string,
+    readonly gitExitedNonZero: boolean,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = "LocalGitCommandError";
+  }
+}
+
+/**
  * Runs one git command against a resolved repository path.
  *
  * Caller cancellation must keep its own meaning, so an abort is rethrown
  * unchanged; every other failure collapses to one message that cannot leak a
- * path or git's own stderr.
+ * path or git's own stderr to the caller. The real cause (git not on PATH, a
+ * `safe.directory` refusal, a corrupt ref, the timeout, ...) is only ever
+ * visible in the server log line this logs before rethrowing, which is the
+ * one place a developer can diagnose it. An absolute repository path can
+ * legitimately appear in that log line; it must simply never reach the
+ * thrown message, and it does not.
  */
-export async function runGit(
+async function runGit(
   repoPath: string,
   args: string[],
   signal?: AbortSignal,
@@ -121,7 +159,38 @@ export async function runGit(
     return stdout;
   } catch (error) {
     signal?.throwIfAborted();
-    throw new Error(LOCAL_REPO_READ_FAILED_ERROR, { cause: error });
+
+    const execError = error as NodeJS.ErrnoException & {
+      code?: number | string | null;
+      killed?: boolean;
+      stderr?: string | Buffer;
+    };
+    // execFile reports a numeric `code` only when the git process actually
+    // ran to completion and exited non-zero. A spawn failure (e.g. ENOENT
+    // when git is missing) reports a string error code instead, and a timeout
+    // kills the process without ever assigning an exit code.
+    const gitExitedNonZero = typeof execError.code === "number";
+    const stderr = Buffer.isBuffer(execError.stderr)
+      ? execError.stderr.toString("utf8")
+      : (execError.stderr ?? "");
+
+    console.error(
+      JSON.stringify({
+        event: "generate.local_repo.git_failed",
+        subcommand: args[0] ?? null,
+        exit_code: execError.code ?? null,
+        killed: Boolean(execError.killed),
+        stderr: stderr.slice(0, 500),
+      }),
+    );
+
+    throw new LocalGitCommandError(
+      LOCAL_REPO_READ_FAILED_ERROR,
+      gitExitedNonZero,
+      {
+        cause: error,
+      },
+    );
   }
 }
 
@@ -134,9 +203,10 @@ interface LocalTreeEntry {
 }
 
 /**
- * Parses `ls-tree -r -l -z` output. The -z form is NUL-terminated and leaves
- * paths unquoted, so a path containing a space, quote, or non-ASCII byte
- * survives intact.
+ * Parses `ls-tree -r -t -l -z` output. The -z form is NUL-terminated and
+ * leaves paths unquoted, so a path containing a space, quote, or non-ASCII
+ * byte survives intact. A tree entry's size field prints as "-", which
+ * `Number.parseInt` turns into `NaN` rather than throwing.
  */
 function parseLsTree(stdout: Buffer): LocalTreeEntry[] {
   const entries: LocalTreeEntry[] = [];
@@ -170,14 +240,12 @@ async function readReadme(
 ): Promise<string> {
   const entry = entries.find(
     (candidate) =>
-      !candidate.path.includes("/") && README_PATTERN.test(candidate.path),
+      candidate.type === "blob" &&
+      !candidate.path.includes("/") &&
+      README_PATTERN.test(candidate.path),
   );
   if (!entry || entry.size > MAX_README_BYTES) return "";
-  const bytes = await runGit(
-    repoPath,
-    ["cat-file", "blob", entry.sha],
-    signal,
-  );
+  const bytes = await runGit(repoPath, ["cat-file", "blob", entry.sha], signal);
   if (bytes.length > MAX_README_BYTES) return "";
   return bytes.toString("utf8");
 }
@@ -205,6 +273,13 @@ export async function loadLocalRepository(
     await runGit(repoPath, ["rev-parse", "--verify", "HEAD"], signal);
   } catch (error) {
     signal?.throwIfAborted();
+    // Only a git process that actually ran and exited non-zero is a real
+    // answer about this repository's state. A spawn failure or a timeout
+    // never got that far, so it must surface as a read failure rather than
+    // the misleading claim that the repository has no commits.
+    if (error instanceof LocalGitCommandError && !error.gitExitedNonZero) {
+      throw new Error(LOCAL_REPO_READ_FAILED_ERROR, { cause: error });
+    }
     throw new Error(LOCAL_REPO_NO_COMMITS_ERROR, { cause: error });
   }
 
@@ -217,24 +292,36 @@ export async function loadLocalRepository(
   // the field only ever feeds a display string on the local path.
   const defaultBranch = branchOutput.toString("utf8").trim() || "HEAD";
 
+  // -t adds directory entries alongside blobs, matching what the GitHub tree
+  // builder receives from the trees API: both feed the same entry loop below
+  // so a local prompt cannot differ in content from a GitHub one for the same
+  // tree.
   const entries = parseLsTree(
-    await runGit(repoPath, ["ls-tree", "-r", "-l", "-z", "HEAD"], signal),
+    await runGit(repoPath, ["ls-tree", "-r", "-t", "-l", "-z", "HEAD"], signal),
   );
 
   const paths: string[] = [];
   const pathTypes = new Map<string, RepositoryPathType>();
   const sourceBlobs = new Map<string, SourceBlob>();
   for (const entry of entries) {
-    if (entry.type !== "blob" || !shouldIncludeFile(entry.path)) continue;
+    if (!shouldIncludeFile(entry.path)) continue;
     paths.push(entry.path);
-    pathTypes.set(entry.path, "blob");
-    if (
-      (entry.mode === "100644" || entry.mode === "100755") &&
-      /^[a-f0-9]{40,64}$/.test(entry.sha) &&
-      Number.isFinite(entry.size) &&
-      entry.size >= 0
-    ) {
-      sourceBlobs.set(entry.path, { sha: entry.sha, size: entry.size });
+    // Mirrors github.ts's tree-processing loop exactly: pathTypes gets both
+    // blob and tree entries (a gitlink/submodule "commit" entry gets neither),
+    // and only a blob with a regular-file mode becomes a source candidate. A
+    // tree entry's size field is "-", not a number, so it never survives the
+    // Number.isFinite check below.
+    if (entry.type === "blob" || entry.type === "tree") {
+      pathTypes.set(entry.path, entry.type);
+      if (
+        entry.type === "blob" &&
+        (entry.mode === "100644" || entry.mode === "100755") &&
+        /^[a-f0-9]{40,64}$/.test(entry.sha) &&
+        Number.isFinite(entry.size) &&
+        entry.size >= 0
+      ) {
+        sourceBlobs.set(entry.path, { sha: entry.sha, size: entry.size });
+      }
     }
   }
 
@@ -270,10 +357,15 @@ export async function loadLocalRepository(
 export function createLocalSourceReader(repoPath: string): SourceReader {
   return async ({ path, blob, signal }): Promise<SourceExcerpt | null> => {
     if (blob.size > MAX_SOURCE_FILE_BYTES) return null;
+    // The reader is exported and its contract does not otherwise say the sha
+    // must be a real object id. Without this, a sha beginning with "-" would
+    // be parsed by cat-file as an option rather than an object. The `--`
+    // below is a second, independent guard against the same class of input.
+    if (!/^[a-f0-9]{40,64}$/.test(blob.sha)) return null;
 
     const bytes = await runGit(
       repoPath,
-      ["cat-file", "blob", blob.sha],
+      ["cat-file", "blob", "--", blob.sha],
       signal,
     );
     if (bytes.length > MAX_SOURCE_FILE_BYTES || bytes.includes(0)) return null;

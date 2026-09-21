@@ -66,6 +66,13 @@ Optional local repository analysis:
   from disk at committed `HEAD` instead of calling GitHub. It is ignored in
   production builds, so a production-mode check via `bun run build` and
   `bun run start` will not serve it.
+- Local mode also requires `R2_ENDPOINT` to be set. A local generation's
+  diagram and README excerpt are written to whichever artifact bucket storage
+  is configured with, the same public bucket a real deployment uses.
+  `R2_ENDPOINT` only has a value when storage has been deliberately pointed at
+  a local S3-compatible server (MinIO), so local mode refuses to run without
+  it rather than risk publishing a private, possibly unpushed repository's
+  diagram to a real public bucket.
 
 The default OpenAI configuration is:
 

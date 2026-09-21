@@ -34,6 +34,12 @@ vi.mock("~/server/generate/github", () => ({
 }));
 vi.mock("~/server/generate/local-repo", () => ({
   LOCAL_REPO_OWNER: "local",
+  INVALID_LOCAL_REPO_NAME_ERROR: "Invalid local repository name.",
+  LOCAL_REPO_NOT_FOUND_ERROR: "Local repository not found.",
+  LOCAL_REPO_NOT_GIT_ERROR: "Not a git repository.",
+  LOCAL_REPO_NO_COMMITS_ERROR: "Local repository has no commits.",
+  LOCAL_REPO_EMPTY_ERROR: "Local repository has no analyzable files.",
+  LOCAL_REPO_READ_FAILED_ERROR: "Could not read the local repository.",
   isLocalRepoEnabled: mocks.isLocalRepoEnabled,
   loadLocalRepository: mocks.loadLocalRepository,
 }));
@@ -215,6 +221,56 @@ describe("POST /api/generate/cost", () => {
       error: expect.stringContaining("GitHub access"),
       error_code: "REPOSITORY_NOT_FOUND",
     });
+  });
+
+  it("passes a local repository's own error message through, like the stream route does", async () => {
+    mocks.isLocalRepoEnabled.mockReturnValue(true);
+    mocks.loadLocalRepository.mockRejectedValue(
+      new Error("Local repository not found."),
+    );
+
+    const response = await POST(
+      request({ username: "local", repo: "countercheck" }),
+    );
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "Local repository not found.",
+      error_code: "LOCAL_REPO_ERROR",
+    });
+  });
+
+  it("maps a local repository with no commits to 422, not the generic failure", async () => {
+    mocks.isLocalRepoEnabled.mockReturnValue(true);
+    mocks.loadLocalRepository.mockRejectedValue(
+      new Error("Local repository has no commits."),
+    );
+
+    const response = await POST(
+      request({ username: "local", repo: "countercheck" }),
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "Local repository has no commits.",
+      error_code: "LOCAL_REPO_ERROR",
+    });
+  });
+
+  it("does not reuse REPOSITORY_NOT_FOUND for a local repository error", async () => {
+    // That code drives a "Private repository?" prompt in the client, which
+    // would be a misleading thing to show for a local dev-mode failure.
+    mocks.isLocalRepoEnabled.mockReturnValue(true);
+    mocks.loadLocalRepository.mockRejectedValue(
+      new Error("Not a git repository."),
+    );
+
+    const response = await POST(
+      request({ username: "local", repo: "countercheck" }),
+    );
+
+    const body = (await response.json()) as { error_code: string };
+    expect(body.error_code).not.toBe("REPOSITORY_NOT_FOUND");
   });
 
   afterEach(() => {

@@ -19,7 +19,13 @@ import {
   REPOSITORY_TOO_LARGE_ERROR,
 } from "~/server/generate/github";
 import {
+  INVALID_LOCAL_REPO_NAME_ERROR,
+  LOCAL_REPO_EMPTY_ERROR,
+  LOCAL_REPO_NOT_FOUND_ERROR,
+  LOCAL_REPO_NOT_GIT_ERROR,
+  LOCAL_REPO_NO_COMMITS_ERROR,
   LOCAL_REPO_OWNER,
+  LOCAL_REPO_READ_FAILED_ERROR,
   isLocalRepoEnabled,
   loadLocalRepository,
 } from "~/server/generate/local-repo";
@@ -48,6 +54,23 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const COST_REQUEST_DEADLINE_MS = 55_000;
+
+// Messages `local-repo.ts` authors itself. The stream route already shows
+// these verbatim to the caller by falling through `normalizeGenerationError`
+// to its default case; this route special-cases GitHub messages instead, so
+// without this map a local-repo failure fell into the generic
+// COST_ESTIMATION_FAILED branch and lost its actual message. A dedicated
+// status per message (rather than reusing REPOSITORY_NOT_FOUND, which the
+// client renders with a "Private repository?" prompt) keeps that mapping
+// meaningful only for genuine GitHub repositories.
+const LOCAL_REPO_ERROR_STATUS: ReadonlyMap<string, number> = new Map([
+  [INVALID_LOCAL_REPO_NAME_ERROR, 404],
+  [LOCAL_REPO_NOT_FOUND_ERROR, 404],
+  [LOCAL_REPO_NOT_GIT_ERROR, 404],
+  [LOCAL_REPO_NO_COMMITS_ERROR, 422],
+  [LOCAL_REPO_EMPTY_ERROR, 422],
+  [LOCAL_REPO_READ_FAILED_ERROR, 500],
+]);
 
 function jsonResponse(
   body: Record<string, unknown>,
@@ -221,8 +244,15 @@ export async function POST(request: Request) {
     const pricingUnavailable = error instanceof ModelPricingUnavailableError;
     const repositoryTooLarge = message === REPOSITORY_TOO_LARGE_ERROR;
     const repositoryNotFound = message === "Repository not found.";
+    const localRepoStatus = LOCAL_REPO_ERROR_STATUS.get(message);
+    const isLocalRepoError = localRepoStatus !== undefined;
 
-    if (!timedOut && !repositoryTooLarge && !repositoryNotFound) {
+    if (
+      !timedOut &&
+      !repositoryTooLarge &&
+      !repositoryNotFound &&
+      !isLocalRepoError
+    ) {
       // Upstream failures carry raw GitHub and provider response bodies. Log
       // them, but hand the caller a fixed message like the stream route does.
       console.error(
@@ -241,7 +271,7 @@ export async function POST(request: Request) {
           ? "Cost estimation timed out. Please retry."
           : pricingUnavailable
             ? MODEL_PRICING_UNAVAILABLE_ERROR
-            : repositoryTooLarge || repositoryNotFound
+            : repositoryTooLarge || repositoryNotFound || isLocalRepoError
               ? message
               : "Failed to estimate generation cost. Please retry.",
         error_code: timedOut
@@ -252,7 +282,9 @@ export async function POST(request: Request) {
               ? "TOKEN_LIMIT_EXCEEDED"
               : repositoryNotFound
                 ? "REPOSITORY_NOT_FOUND"
-                : "COST_ESTIMATION_FAILED",
+                : isLocalRepoError
+                  ? "LOCAL_REPO_ERROR"
+                  : "COST_ESTIMATION_FAILED",
       },
       {
         status: timedOut
@@ -263,7 +295,9 @@ export async function POST(request: Request) {
               ? 413
               : repositoryNotFound
                 ? 404
-                : 500,
+                : isLocalRepoError
+                  ? (localRepoStatus ?? 500)
+                  : 500,
         requestId,
       },
     );

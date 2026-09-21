@@ -19,6 +19,7 @@ import {
   LOCAL_REPO_NOT_FOUND_ERROR,
   LOCAL_REPO_NOT_GIT_ERROR,
   LOCAL_REPO_OWNER,
+  LOCAL_REPO_READ_FAILED_ERROR,
   createLocalSourceReader,
   isLocalRepoEnabled,
   loadLocalRepository,
@@ -41,6 +42,10 @@ beforeEach(async () => {
   // readonly, and stubs unwind cleanly even if a case throws.
   vi.stubEnv("LOCAL_REPO_ROOT", root);
   vi.stubEnv("NODE_ENV", "development");
+  // Local mode also requires storage to be pointed at a local S3-compatible
+  // server (see isLocalRepoEnabled's doc comment), so every test that expects
+  // local mode to be reachable needs this stubbed too.
+  vi.stubEnv("R2_ENDPOINT", "http://127.0.0.1:9000");
 });
 
 afterEach(async () => {
@@ -61,7 +66,8 @@ async function initRepo(
 ): Promise<string> {
   const path = join(root, name);
   await mkdir(path, { recursive: true });
-  const git = (...args: string[]) => execFileAsync("git", ["-C", path, ...args]);
+  const git = (...args: string[]) =>
+    execFileAsync("git", ["-C", path, ...args]);
   await git("init", "-q");
   await git("config", "user.email", "test@example.com");
   await git("config", "user.name", "Test");
@@ -75,7 +81,8 @@ async function initRepo(
 }
 
 async function commitAll(path: string) {
-  const git = (...args: string[]) => execFileAsync("git", ["-C", path, ...args]);
+  const git = (...args: string[]) =>
+    execFileAsync("git", ["-C", path, ...args]);
   await git("add", "-A");
   await git("commit", "-q", "-m", "initial");
 }
@@ -98,6 +105,23 @@ describe("isLocalRepoEnabled", () => {
   it("is false in production even with a root set", () => {
     vi.stubEnv("NODE_ENV", "production");
     expect(isLocalRepoEnabled()).toBe(false);
+  });
+
+  it("is false without R2_ENDPOINT, even with a root set", () => {
+    vi.stubEnv("R2_ENDPOINT", undefined);
+    expect(isLocalRepoEnabled()).toBe(false);
+  });
+
+  it("is false when R2_ENDPOINT is blank", () => {
+    vi.stubEnv("R2_ENDPOINT", "   ");
+    expect(isLocalRepoEnabled()).toBe(false);
+  });
+
+  it("is true with all three conditions satisfied", () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("LOCAL_REPO_ROOT", root);
+    vi.stubEnv("R2_ENDPOINT", "http://127.0.0.1:9000");
+    expect(isLocalRepoEnabled()).toBe(true);
   });
 });
 
@@ -191,13 +215,19 @@ describe("loadLocalRepository", () => {
     expect(data.isPrivate).toBe(false);
     expect(data.stargazerCount).toBeNull();
     expect(data.readme).toContain("# App");
+    // "src" itself is included as a directory entry, matching the GitHub
+    // provider's tree builder, which the local provider must not differ from.
     expect(data.fileTree.split("\n").sort()).toEqual([
       "README.md",
+      "src",
       "src/index.ts",
       "src/util.ts",
     ]);
+    expect(data.pathTypes.get("src")).toBe("tree");
     expect(data.pathTypes.get("src/index.ts")).toBe("blob");
-    expect(data.sourceBlobs?.get("src/index.ts")?.sha).toMatch(/^[a-f0-9]{40}$/);
+    expect(data.sourceBlobs?.get("src/index.ts")?.sha).toMatch(
+      /^[a-f0-9]{40}$/,
+    );
     expect(data.sourceBlobs?.get("src/index.ts")?.size).toBe(
       "export const x = 1;\n".length,
     );
@@ -228,11 +258,21 @@ describe("loadLocalRepository", () => {
 
     const { data } = await loadLocalRepository("filtered");
 
-    expect(data.fileTree).toBe("src/index.ts");
+    // "dist" survives as a bare directory entry: shouldIncludeFile excludes
+    // the minified blob inside it by suffix, but "dist" itself matches no
+    // excluded directory segment, exactly as the GitHub provider would treat
+    // the same tree. "node_modules" and everything under it are excluded.
+    expect(data.fileTree.split("\n").sort()).toEqual([
+      "dist",
+      "src",
+      "src/index.ts",
+    ]);
   });
 
   it("returns an empty readme when the repository has none", async () => {
-    const path = await initRepo("noreadme", { "a.ts": "export const a = 1;\n" });
+    const path = await initRepo("noreadme", {
+      "a.ts": "export const a = 1;\n",
+    });
     await commitAll(path);
 
     const { data } = await loadLocalRepository("noreadme");
@@ -242,7 +282,7 @@ describe("loadLocalRepository", () => {
 
   it("finds a readme regardless of case or extension", async () => {
     const path = await initRepo("cased", {
-      "readme": "plain readme\n",
+      readme: "plain readme\n",
       "a.ts": "export const a = 1;\n",
     });
     await commitAll(path);
@@ -252,11 +292,70 @@ describe("loadLocalRepository", () => {
     expect(data.readme).toContain("plain readme");
   });
 
-  it("rejects a repository with no commits", async () => {
+  it("rejects a repository with no commits, and logs the real git failure", async () => {
     await initRepo("empty", { "a.ts": "export const a = 1;\n" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await expect(loadLocalRepository("empty")).rejects.toThrow(
       LOCAL_REPO_NO_COMMITS_ERROR,
+    );
+
+    // git ran and exited non-zero here, so the real stderr (which nothing
+    // else surfaces) must reach the server log even though the thrown
+    // message stays generic.
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    const logged = JSON.parse(errorSpy.mock.calls[0]?.[0] as string) as {
+      event: string;
+      subcommand: string;
+      exit_code: number | null;
+      stderr: string;
+    };
+    expect(logged.event).toBe("generate.local_repo.git_failed");
+    expect(logged.subcommand).toBe("rev-parse");
+    expect(typeof logged.exit_code).toBe("number");
+    expect(logged.stderr.length).toBeGreaterThan(0);
+
+    errorSpy.mockRestore();
+  });
+
+  it("reports a read failure, not no-commits, when git cannot be spawned", async () => {
+    const path = await initRepo("spawnfail", {
+      "a.ts": "export const a = 1;\n",
+    });
+    await commitAll(path);
+
+    // An empty PATH means the "git" executable cannot be found at all: the
+    // process never starts, so this must not be reported as the repository
+    // having no commits.
+    const emptyPathDir = await mkdtemp(
+      join(tmpdir(), "gitdiagram-empty-path-"),
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubEnv("PATH", emptyPathDir);
+
+    await expect(loadLocalRepository("spawnfail")).rejects.toThrow(
+      LOCAL_REPO_READ_FAILED_ERROR,
+    );
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    const logged = JSON.parse(errorSpy.mock.calls[0]?.[0] as string) as {
+      event: string;
+      exit_code: number | string | null;
+    };
+    expect(logged.event).toBe("generate.local_repo.git_failed");
+    expect(typeof logged.exit_code).not.toBe("number");
+
+    errorSpy.mockRestore();
+    await rm(emptyPathDir, { recursive: true, force: true });
+  }, 15_000);
+
+  it("rejects loading when R2_ENDPOINT is not configured, even for a valid repository", async () => {
+    const path = await initRepo("no-r2", { "a.ts": "export const a = 1;\n" });
+    await commitAll(path);
+    vi.stubEnv("R2_ENDPOINT", undefined);
+
+    await expect(loadLocalRepository("no-r2")).rejects.toThrow(
+      LOCAL_REPO_NOT_FOUND_ERROR,
     );
   });
 
@@ -284,27 +383,21 @@ describe("loadLocalRepository", () => {
   // Deliberately built from a few long paths rather than many short ones: the
   // limit counts characters, so deep directory names reach 780k with ~1300
   // files instead of ~8000, which keeps this the only slow case in the file.
-  it(
-    "rejects a tree over the character limit",
-    async () => {
-      const deep = ["a".repeat(200), "b".repeat(200), "c".repeat(200)].join(
-        "/",
-      );
-      const files: Record<string, string> = {};
-      const perPath = deep.length + "/file0000.ts".length;
-      const needed = Math.ceil(MAX_INCLUDED_FILE_TREE_CHARACTERS / perPath) + 5;
-      for (let index = 0; index < needed; index++) {
-        files[`${deep}/file${String(index).padStart(4, "0")}.ts`] = "0\n";
-      }
-      const path = await initRepo("huge", files);
-      await commitAll(path);
+  it("rejects a tree over the character limit", async () => {
+    const deep = ["a".repeat(200), "b".repeat(200), "c".repeat(200)].join("/");
+    const files: Record<string, string> = {};
+    const perPath = deep.length + "/file0000.ts".length;
+    const needed = Math.ceil(MAX_INCLUDED_FILE_TREE_CHARACTERS / perPath) + 5;
+    for (let index = 0; index < needed; index++) {
+      files[`${deep}/file${String(index).padStart(4, "0")}.ts`] = "0\n";
+    }
+    const path = await initRepo("huge", files);
+    await commitAll(path);
 
-      await expect(loadLocalRepository("huge")).rejects.toThrow(
-        REPOSITORY_TOO_LARGE_ERROR,
-      );
-    },
-    120_000,
-  );
+    await expect(loadLocalRepository("huge")).rejects.toThrow(
+      REPOSITORY_TOO_LARGE_ERROR,
+    );
+  }, 120_000);
 });
 
 describe("createLocalSourceReader", () => {
@@ -353,6 +446,20 @@ describe("createLocalSourceReader", () => {
       createLocalSourceReader(repoPath)({
         path: "blob.bin",
         blob,
+        signal: AbortSignal.timeout(5_000),
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("returns null for a malformed sha without invoking git", async () => {
+    // The repo path does not exist, so if the sha guard were missing this
+    // would reach runGit and reject (a non-existent -C target is a git
+    // failure), not resolve to null. Resolving to null proves git was never
+    // invoked.
+    await expect(
+      createLocalSourceReader("/definitely/does/not/exist")({
+        path: "a.ts",
+        blob: { sha: "-rf", size: 1 },
         signal: AbortSignal.timeout(5_000),
       }),
     ).resolves.toBeNull();

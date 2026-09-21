@@ -1100,17 +1100,29 @@ describe("POST /api/generate/stream", () => {
     it("resolves a local repository exactly once and reuses its path for the source reader", async () => {
       mockEstimate(1_000);
       mocks.isLocalRepoEnabled.mockReturnValue(true);
+      const localBlob = { sha: "a".repeat(40), size: 20 };
       mocks.loadLocalRepository.mockResolvedValue({
         repoPath: "/repos/countercheck",
         data: {
           defaultBranch: "main",
           fileTree: "src/index.ts",
           pathTypes: new Map([["src/index.ts", "blob"]]),
+          sourceBlobs: new Map([["src/index.ts", localBlob]]),
           readme: "# Countercheck",
           isPrivate: false,
           stargazerCount: null,
         },
       });
+      // Without sourceBlobs above, fetchSourceContext takes its early-return
+      // path and never calls a reader at all, so the reader mock below is
+      // what actually proves createLocalSourceReader's return value gets
+      // used, not just constructed.
+      const localReader = vi.fn().mockResolvedValue({
+        path: "src/index.ts",
+        text: "export const x = 1;\n",
+        truncated: false,
+      });
+      mocks.createLocalSourceReader.mockReturnValue(localReader);
 
       const response = await POST(
         request({ username: "local", repo: "countercheck" }),
@@ -1128,6 +1140,13 @@ describe("POST /api/generate/stream", () => {
       expect(mocks.getGithubData).not.toHaveBeenCalled();
       expect(mocks.createLocalSourceReader).toHaveBeenCalledWith(
         "/repos/countercheck",
+      );
+      expect(localReader).toHaveBeenCalledWith(
+        expect.objectContaining({
+          path: "src/index.ts",
+          blob: localBlob,
+          signal: expect.any(AbortSignal),
+        }),
       );
     });
 
