@@ -28,9 +28,16 @@ async function getClient() {
   s3ModulePromise ??= import("@aws-sdk/client-s3");
   const s3 = await s3ModulePromise;
 
+  // R2_ENDPOINT lets local development point at an S3-compatible server
+  // (MinIO) instead of Cloudflare. Unset in production.
+  const customEndpoint = process.env.R2_ENDPOINT?.trim();
+
   client ??= new s3.S3Client({
     region: "auto",
-    endpoint: `https://${readRequiredEnv("R2_ACCOUNT_ID")}.r2.cloudflarestorage.com`,
+    endpoint:
+      customEndpoint ??
+      `https://${readRequiredEnv("R2_ACCOUNT_ID")}.r2.cloudflarestorage.com`,
+    forcePathStyle: Boolean(customEndpoint),
     credentials: {
       accessKeyId: readRequiredEnv("R2_ACCESS_KEY_ID"),
       secretAccessKey: readRequiredEnv("R2_SECRET_ACCESS_KEY"),

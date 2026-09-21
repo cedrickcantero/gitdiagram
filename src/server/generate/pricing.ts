@@ -53,6 +53,10 @@ const MODEL_PRICING: Record<string, ModelPricing> = {
   "gpt-5-mini": { inputPerMillionUsd: 0.25, outputPerMillionUsd: 2.0 },
   "gpt-5-nano": { inputPerMillionUsd: 0.05, outputPerMillionUsd: 0.4 },
   "o4-mini": { inputPerMillionUsd: 1.1, outputPerMillionUsd: 4.4 },
+
+  // OpenRouter ":free" variants bill nothing, so a single zero-cost entry
+  // covers all of them.
+  "openrouter:free": { inputPerMillionUsd: 0, outputPerMillionUsd: 0 },
 };
 export const MODEL_PRICING_UNAVAILABLE_ERROR =
   "Cost information is unavailable for the configured AI model.";
@@ -78,6 +82,7 @@ function stripProviderPrefix(model: string): string {
 
 export function resolvePricingModel(model: string): string | null {
   const normalized = normalizeModelId(model);
+  if (normalized.endsWith(":free")) return "openrouter:free";
   if (MODEL_PRICING[normalized]) return normalized;
 
   const withoutDate = stripDateSnapshotSuffix(stripProviderPrefix(normalized));
