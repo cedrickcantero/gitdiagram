@@ -10,7 +10,6 @@ import { exampleRepos, isExampleRepo } from "~/lib/exampleRepos";
 import { ExportDropdown } from "./export-dropdown";
 import { Switch } from "~/components/ui/switch";
 import { parseGitHubRepoUrl } from "~/features/diagram/github-url";
-import { SponsorSlot } from "~/components/sponsor-slot";
 import type { GenerationCostSummary } from "~/features/diagram/cost";
 
 interface MainCardProps {
@@ -244,7 +243,6 @@ export default function MainCard({
                 ))}
               </div>
             </div>
-            <SponsorSlot surface="home" />
           </div>
         )}
       </form>

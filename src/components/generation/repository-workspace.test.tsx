@@ -18,7 +18,6 @@ const renders = new Map<
   }
 >();
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
-vi.mock("~/components/sponsor-slot", () => ({ SponsorSlot: () => null }));
 vi.mock("next/dynamic", () => ({
   default:
     () =>
