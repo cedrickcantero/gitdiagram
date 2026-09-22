@@ -26,7 +26,7 @@ Turn any public or private GitHub repository into an interactive architecture di
 Requires [Bun](https://bun.sh/), Cloudflare R2, Upstash Redis, and an OpenAI or OpenRouter API key. See the [setup guide](docs/dev-setup.md) for prerequisites and configuration.
 
 ```bash
-git clone https://github.com/ahmedkhaleel2004/gitdiagram.git
+git clone https://github.com/cedrickcantero/gitdiagram.git
 cd gitdiagram
 bun install
 cp .env.example .env
