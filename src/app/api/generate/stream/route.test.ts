@@ -1150,6 +1150,70 @@ describe("POST /api/generate/stream", () => {
       );
     });
 
+    it("compiles a local diagram without github.com click targets", async () => {
+      mockEstimate(1_000);
+      mocks.isLocalRepoEnabled.mockReturnValue(true);
+      mocks.loadLocalRepository.mockResolvedValue({
+        repoPath: "/repos/countercheck",
+        data: {
+          defaultBranch: "main",
+          fileTree: "src/index.ts",
+          pathTypes: new Map([["src/index.ts", "blob"]]),
+          sourceBlobs: new Map(),
+          readme: "# Countercheck",
+          isPrivate: false,
+          stargazerCount: null,
+        },
+      });
+      mocks.streamCompletion.mockResolvedValue({
+        stream: (async function* () {
+          yield "<explanation>Local request flow.</explanation>";
+        })(),
+        usagePromise: Promise.resolve({
+          inputTokens: 80,
+          outputTokens: 20,
+          totalTokens: 100,
+        }),
+      });
+      // A node WITH a path is what would normally produce a click line, so
+      // this graph is the case that fails if emitLinks is not threaded through.
+      const graph = {
+        groups: [],
+        nodes: [
+          {
+            id: "entrypoint",
+            label: "Entry point",
+            type: "TypeScript module",
+            description: null,
+            groupId: null,
+            path: "src/index.ts",
+            shape: "box",
+          },
+        ],
+        edges: [],
+      };
+      mocks.generateStructuredOutput.mockResolvedValue({
+        output: graph,
+        rawText: JSON.stringify(graph),
+        usage: { inputTokens: 80, outputTokens: 20, totalTokens: 100 },
+      });
+
+      const response = await POST(
+        request({ username: "local", repo: "countercheck" }),
+      );
+      const terminal = readSseEvents(await response.text()).find(
+        (event) => event.status === "complete",
+      );
+
+      const diagram = String(terminal?.diagram);
+      expect(diagram).toContain("flowchart TD");
+      expect(diagram).toContain("node_entrypoint");
+      expect(diagram.split("\n").filter((l) => l.startsWith("click "))).toEqual(
+        [],
+      );
+      expect(diagram).not.toContain("github.com");
+    });
+
     it("takes the GitHub path when local mode is enabled but the owner is not local", async () => {
       mockEstimate(1_000);
       mocks.isLocalRepoEnabled.mockReturnValue(true);

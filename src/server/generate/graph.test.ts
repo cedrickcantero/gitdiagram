@@ -251,6 +251,46 @@ describe("compileDiagramGraph", () => {
     );
   });
 
+  it("omits click targets when the repository has no GitHub location", () => {
+    const graph = {
+      groups: [],
+      nodes: [
+        {
+          id: "api",
+          label: "API",
+          type: "service",
+          description: null,
+          groupId: null,
+          path: "packages/server",
+          shape: "box" as const,
+        },
+      ],
+      edges: [],
+    };
+    const args = {
+      username: "local",
+      repo: "advanced-pos",
+      branch: "develop",
+      graph,
+    };
+
+    const linked = compileDiagramGraph(args);
+    const unlinked = compileDiagramGraph({ ...args, emitLinks: false });
+
+    // The default still links, so no existing caller changes behavior.
+    expect(
+      linked.split("\n").filter((line) => line.startsWith("click ")),
+    ).toEqual([
+      'click node_api "https://github.com/local/advanced-pos/tree/develop/packages/server"',
+    ]);
+    // With links off, the node survives but nothing points at github.com.
+    expect(
+      unlinked.split("\n").filter((line) => line.startsWith("click ")),
+    ).toEqual([]);
+    expect(unlinked).not.toContain("github.com");
+    expect(unlinked).toContain("node_api");
+  });
+
   it("collapses line and control characters before compiling labels", async () => {
     const diagram = compileDiagramGraph({
       username: "acme",

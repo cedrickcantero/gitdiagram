@@ -405,8 +405,17 @@ export function compileDiagramGraph(params: {
   repo: string;
   branch: string;
   pathTypes?: ReadonlyMap<string, RepositoryPathType>;
+  /**
+   * Whether node click targets should be emitted. Pass false when the
+   * repository has no GitHub location, such as a repository read from the
+   * local filesystem: every link this compiler produces points at github.com,
+   * and the client's link allowlist accepts nothing else, so a link for a
+   * repository that is not on GitHub can only ever be a dead end.
+   */
+  emitLinks?: boolean;
 }): string {
   const { graph, username, repo, branch, pathTypes } = params;
+  const emitLinks = params.emitLinks ?? true;
   const lines: string[] = ["flowchart TD"];
   const groupedNodeIds = new Set<string>();
   const classAssignments = new Map<string, string[]>();
@@ -454,7 +463,9 @@ export function compileDiagramGraph(params: {
     }
   }
 
-  const nodesWithPaths = graph.nodes.filter((node) => node.path);
+  const nodesWithPaths = emitLinks
+    ? graph.nodes.filter((node) => node.path)
+    : [];
   if (nodesWithPaths.length) {
     lines.push("");
     for (const node of nodesWithPaths) {

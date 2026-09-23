@@ -806,6 +806,9 @@ export async function POST(request: Request) {
             repo,
             branch: githubData.defaultBranch,
             pathTypes: githubData.pathTypes,
+            // A local repository has no github.com location, so every link the
+            // compiler would build for it is dead on arrival.
+            emitLinks: !localRepo,
           });
           recordTiming("diagram_compile", diagramCompileStartedAt);
           audit = withCompiledDiagram(audit, diagram);
